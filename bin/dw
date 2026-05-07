@@ -73,15 +73,58 @@ prompt_yes() {
   case "${reply:-y}" in y|Y|yes|YES|Yes) return 0 ;; *) return 1 ;; esac
 }
 
-print_input_codes() {
-  cat <<'EOF'
-  Common VCP 0x60 input codes:
-    15  DisplayPort 1
-    16  DisplayPort 2
-    17  HDMI 1
-    18  HDMI 2
-    27  USB-C
-EOF
+prompt_yes_default_no() {
+  local prompt="$1" reply=""
+  if [ -t 0 ]; then read -r -p "$prompt [y/N] " reply || true; fi
+  case "${reply:-n}" in y|Y|yes|YES|Yes) return 0 ;; *) return 1 ;; esac
+}
+
+# macOS hostname → safe, lowercase device name. Falls back if unavailable.
+default_device_name() {
+  local h
+  h="$(scutil --get LocalHostName 2>/dev/null || true)"
+  [ -n "$h" ] || h="$(hostname -s 2>/dev/null || true)"
+  [ -n "$h" ] || h="this-mac"
+  printf '%s' "$h" | tr '[:upper:]' '[:lower:]' \
+    | sed 's/[^a-z0-9._-]/-/g; s/--*/-/g; s/^-//; s/-$//'
+}
+
+port_name_for_code() {
+  case "$1" in
+    27) printf 'USB-C\n' ;;
+    17) printf 'HDMI 1\n' ;;
+    18) printf 'HDMI 2\n' ;;
+    15) printf 'DisplayPort 1\n' ;;
+    16) printf 'DisplayPort 2\n' ;;
+    *)  printf 'VCP %s\n' "$1" ;;
+  esac
+}
+
+# Sets globals SELECTED_PORT_CODE and SELECTED_PORT_NAME from a menu choice.
+prompt_port_choice() {
+  local default="${1:-1}" reply=""
+  printf '  Port:\n'
+  printf '    1. USB-C / Thunderbolt\n'
+  printf '    2. HDMI 1\n'
+  printf '    3. HDMI 2\n'
+  printf '    4. DisplayPort 1\n'
+  printf '    5. Custom (enter VCP code)\n'
+  if [ -t 0 ]; then read -r -p "  Choice [$default]: " reply || true; fi
+  reply="${reply:-$default}"
+  case "$reply" in
+    1) SELECTED_PORT_CODE=27; SELECTED_PORT_NAME="USB-C" ;;
+    2) SELECTED_PORT_CODE=17; SELECTED_PORT_NAME="HDMI 1" ;;
+    3) SELECTED_PORT_CODE=18; SELECTED_PORT_NAME="HDMI 2" ;;
+    4) SELECTED_PORT_CODE=15; SELECTED_PORT_NAME="DisplayPort 1" ;;
+    5)
+      local code=""
+      if [ -t 0 ]; then read -r -p "  Custom VCP code (1-30): " code || true; fi
+      [[ "$code" =~ ^[0-9]+$ ]] || die "VCP code must be numeric"
+      SELECTED_PORT_CODE="$code"
+      SELECTED_PORT_NAME="VCP $code"
+      ;;
+    *) die "invalid port choice: $reply" ;;
+  esac
 }
 
 repo_dir() {
@@ -115,58 +158,83 @@ bootstrap_url() {
 }
 
 cmd_init() {
-  info "dw init — set up devices on this Mac."
+  info "dw init"
   info ""
-  info "Displays detected by m1ddc:"
+
+  if config_exists; then
+    info "Existing config: $CONFIG_FILE"
+    prompt_yes_default_no "Overwrite?" || { info "Aborted."; return 0; }
+    info ""
+  fi
+
+  info "Displays detected:"
   list_displays | sed 's/^/  /'
   info ""
 
   local display_n
-  display_n=$(prompt_default "Which display number to control?" "1")
+  display_n=$(prompt_default "Which display to control?" "1")
   is_int "$display_n" || die "display number must be numeric"
-
-  if ! prompt_yes "Is the monitor currently displaying THIS Mac?"; then
-    die "Switch the monitor to THIS Mac (with its joystick/OSD), then re-run init."
-  fi
-
-  info ""
-  print_input_codes
   info ""
 
-  local n_devices
-  n_devices=$(prompt_default "How many devices share this monitor?" "2")
-  is_int "$n_devices" || die "device count must be numeric"
-  [ "$n_devices" -ge 2 ] || die "at least 2 devices required"
+  prompt_yes "Is display $display_n currently showing THIS Mac?" \
+    || die "Switch display $display_n to THIS Mac (use its joystick) and re-run."
+  info ""
 
-  local devices_json='{}' i name code
-  for ((i=1; i<=n_devices; i++)); do
-    info ""
-    info "Device $i of $n_devices:"
-    name=$(prompt_default "  Name (no spaces)" "device-$i")
-    is_name "$name" || die "name '$name' contains invalid characters (allowed: letters, digits, . _ -)"
-    code=$(prompt_default "  VCP input code" "27")
-    is_int "$code"  || die "input code must be numeric"
+  local default_name; default_name="$(default_device_name)"
+  info "THIS Mac"
+  info "──────────────────────────────────────────"
+  local this_name
+  this_name=$(prompt_default "  Name" "$default_name")
+  is_name "$this_name" || die "invalid name '$this_name' (use letters, digits, . _ -)"
+  prompt_port_choice 1
+  local devices_json
+  devices_json=$(jq -n --arg n "$this_name" --argjson c "$SELECTED_PORT_CODE" \
+                    '{($n): {input: $c}}')
+  info ""
+
+  local i=2 oname
+  while true; do
+    if [ "$i" -eq 2 ]; then
+      info "Other Mac"
+    else
+      info "Mac $i"
+    fi
+    info "──────────────────────────────────────────"
+    oname=$(prompt_default "  Name" "other-$((i-1))")
+    is_name "$oname" || die "invalid name '$oname'"
+    if printf '%s' "$devices_json" | jq -e --arg n "$oname" '.[$n]' >/dev/null; then
+      die "device '$oname' already added"
+    fi
+    prompt_port_choice 2
     devices_json=$(printf '%s' "$devices_json" \
-      | jq --arg n "$name" --argjson c "$code" '. + {($n): {input: $c}}')
+      | jq --arg n "$oname" --argjson c "$SELECTED_PORT_CODE" '. + {($n): {input: $c}}')
+    info ""
+    if [ "$i" -ge 2 ]; then
+      prompt_yes_default_no "Add another Mac?" || break
+    fi
+    i=$((i+1))
   done
 
   info ""
-  info "Configured devices:"
-  printf '%s' "$devices_json" | jq -r 'to_entries[] | "  \(.key) → input \(.value.input)"'
+  info "┌─ Configuration ──────────────────────────"
+  printf '%s' "$devices_json" \
+    | jq -r --arg this "$this_name" \
+        'to_entries[] | "\(.key)\t\(.value.input)\t\(if .key == $this then "← this Mac" else "" end)"' \
+    | while IFS=$'\t' read -r name code marker; do
+        port="$(port_name_for_code "$code")"
+        printf '│  • %-20s on %-15s %s\n' "$name" "$port" "$marker"
+      done
+  info "└──────────────────────────────────────────"
   info ""
-  local first_name
-  first_name=$(printf '%s' "$devices_json" | jq -r 'keys_unsorted[0]')
-  local this_device_name
-  this_device_name=$(prompt_default "Which one is THIS Mac?" "$first_name")
-  printf '%s' "$devices_json" | jq -e --arg n "$this_device_name" '.[$n]' >/dev/null \
-    || die "'$this_device_name' is not in the device list"
+
+  prompt_yes "Save?" || { info "Aborted."; return 0; }
 
   mkdir -p "$CONFIG_DIR"
   local tmp; tmp=$(mktemp)
   jq -n \
     --argjson v 2 \
     --arg    dsel "$display_n" \
-    --arg    this "$this_device_name" \
+    --arg    this "$this_name" \
     --argjson devs "$devices_json" \
     '{version: $v, display: {selector: $dsel}, this_device: $this, devices: $devs}' \
     > "$tmp"
@@ -175,15 +243,9 @@ cmd_init() {
   info ""
   ok "Wrote $CONFIG_FILE"
   info ""
-  info "Try:"
-  info "  dw status"
-  info "  dw list"
-  for n in $(device_names); do
-    [ "$n" = "$this_device_name" ] && continue
-    info "  dw $n"
-  done
-  info "  dw setup raycast       # generate per-device commands and add to Raycast"
-  info "  dw share               # one-paste install commands for the other devices"
+  info "Next:"
+  info "  dw setup raycast       wire dw into Raycast"
+  info "  dw share               install commands for the other Macs"
 }
 
 cmd_status() {
