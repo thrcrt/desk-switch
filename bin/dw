@@ -8,7 +8,7 @@ set -euo pipefail
 # other launcher that strips PATH.
 export PATH="/opt/homebrew/bin:$HOME/bin:$HOME/.local/bin:$PATH"
 
-VERSION="0.3.0"
+VERSION="0.4.0"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/dw"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 
