@@ -232,15 +232,43 @@ cmd_toggle() {
 
 # --- setup subcommand: wire dw into hotkey runners ----------------------------
 
+setup_raycast_manual() {
+  local rd dir
+  rd="$(repo_dir)"
+  dir="$rd/bindings/raycast"
+  printf '%s' "$dir" | pbcopy
+  ok "Path copied to clipboard:"
+  info "  $dir"
+  info ""
+  info "Opening Raycast. From the menu, go to:"
+  info "  Settings (⌘,) → Extensions → Script Commands → '+' → Add Script Directory"
+  info "Paste the path with ⌘V and confirm. After that, typing 'dw' in"
+  info "Raycast finds the toggle command."
+  open "raycast://"
+}
+
 setup_raycast() {
   if [ ! -d /Applications/Raycast.app ]; then
     die "Raycast not found at /Applications/Raycast.app. Install it (raycast.com or 'brew install --cask raycast'), then re-run."
   fi
-  local raw_url deeplink
+  local raw_url
   raw_url="$(github_raw_url 'bindings/raycast/dw-toggle.sh')"
-  deeplink="raycast://script-commands/install?url=$(printf %s "$raw_url" | jq -sRr @uri)"
 
-  info "Opening Raycast to install the 'dw' script command."
+  # Only the deeplink path works if the script is reachable on the open web.
+  # If the repo's private (or the latest version isn't pushed yet), fall back
+  # to the local directory-add flow.
+  if ! curl -fsIL "$raw_url" >/dev/null 2>&1; then
+    info "Couldn't fetch $raw_url"
+    info "(Private repo, or the latest commit hasn't been pushed yet?)"
+    info "Falling back to local directory setup."
+    info ""
+    setup_raycast_manual
+    return
+  fi
+
+  local deeplink
+  deeplink="raycast://script-commands/install?source=$(printf %s "$raw_url" | jq -sRr @uri)"
+  info "Opening Raycast install deeplink for the 'dw' command."
   info ""
   info "  Source: $raw_url"
   info ""
