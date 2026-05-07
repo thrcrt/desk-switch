@@ -4,13 +4,12 @@
 
 set -euo pipefail
 
-# Make sure brew-managed deps are findable when invoked from Raycast,
-# Hammerspoon, Shortcuts, or any other launcher that strips PATH.
+# Make sure brew-managed deps are findable when invoked from Raycast or any
+# other launcher that strips PATH.
 export PATH="/opt/homebrew/bin:$HOME/bin:$HOME/.local/bin:$PATH"
 
 VERSION="0.3.0"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/dw"
-LEGACY_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/desk-switch"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 
 err()  { printf 'dw: %s\n' "$*" >&2; }
@@ -28,38 +27,6 @@ require_cmd jq
 is_int() { [[ "$1" =~ ^[0-9]+$ ]]; }
 is_name() { [[ "$1" =~ ^[a-zA-Z0-9._-]+$ ]]; }
 
-# --- legacy directory move -----------------------------------------------------
-if [ ! -d "$CONFIG_DIR" ] && [ -d "$LEGACY_CONFIG_DIR" ]; then
-  mv "$LEGACY_CONFIG_DIR" "$CONFIG_DIR"
-fi
-
-# --- config v1 → v2 migration --------------------------------------------------
-# v1 schema: { sides: { this: {label, input}, other: {label, input} } }
-# v2 schema: { this_device, devices: { <name>: {input}, ... } }
-migrate_config_if_needed() {
-  [ -f "$CONFIG_FILE" ] || return 0
-  local v
-  v="$(jq -r '.version // empty' "$CONFIG_FILE" 2>/dev/null || true)"
-  [ "$v" = "1" ] || return 0
-  info "Migrating config from v1 → v2..."
-  local tmp; tmp=$(mktemp)
-  jq '
-    {
-      version: 2,
-      display: .display,
-      this_device: .sides.this.label,
-      devices: {
-        (.sides.this.label):  { input: .sides.this.input },
-        (.sides.other.label): { input: .sides.other.input }
-      }
-    }
-  ' "$CONFIG_FILE" > "$tmp"
-  mv "$tmp" "$CONFIG_FILE"
-  ok "Migrated $CONFIG_FILE"
-}
-migrate_config_if_needed
-
-# --- config helpers ------------------------------------------------------------
 config_exists() { [ -f "$CONFIG_FILE" ]; }
 
 read_config() {
@@ -77,14 +44,12 @@ display_sel()  { get_cfg '.display.selector'; }
 
 has_device() { [ -n "$(input_for "$1")" ]; }
 
-# Atomic config write: replaces $CONFIG_FILE with new contents from a jq filter.
 write_cfg_jq() {
   local filter="$1"
   local tmp; tmp=$(mktemp)
   jq "$filter" "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
 }
 
-# --- DDC actions ---------------------------------------------------------------
 list_displays() { m1ddc display list 2>&1; }
 
 do_switch() {
@@ -96,7 +61,6 @@ do_switch() {
   fi
 }
 
-# --- prompts -------------------------------------------------------------------
 prompt_default() {
   local prompt="$1" default="$2" reply=""
   if [ -t 0 ]; then read -r -p "$prompt [$default]: " reply || true; fi
@@ -120,7 +84,6 @@ print_input_codes() {
 EOF
 }
 
-# --- repo introspection (used by setup commands) ------------------------------
 repo_dir() {
   local src="${BASH_SOURCE[0]}"
   while [ -L "$src" ]; do
@@ -150,8 +113,6 @@ origin_slug() {
 bootstrap_url() {
   printf 'https://raw.githubusercontent.com/%s/main/bootstrap.sh\n' "$(origin_slug)"
 }
-
-# === COMMANDS ==================================================================
 
 cmd_init() {
   info "dw init — set up devices on this Mac."
@@ -269,7 +230,6 @@ cmd_toggle() {
   read_config
   local n; n=$(device_count)
   if [ "$n" -eq 2 ]; then
-    # 2 devices: switch to whichever isn't this_device.
     local td; td="$(this_device)"
     local other; other="$(device_names | grep -v "^${td}$" | head -1)"
     do_switch "$(display_sel)" "$(input_for "$other")" "$other"
@@ -322,28 +282,18 @@ cmd_reset() {
   local yes=0
   case "${1:-}" in --yes|-y) yes=1 ;; esac
 
-  # Inventory what reset would touch.
-  local config_present=0 raycast_gen="" hs_present=0
-  [ -d "$CONFIG_DIR" ]                                        && config_present=1
-  local rd; rd="$(repo_dir 2>/dev/null || true)"
-  if [ -n "$rd" ] && [ -d "$rd/bindings/raycast/generated" ]; then
-    raycast_gen="$rd/bindings/raycast/generated"
-  fi
-  local hs_init="$HOME/.hammerspoon/init.lua"
-  local hs_marker="-- dw:start (managed by 'dw setup hammerspoon')"
-  if [ -f "$hs_init" ] && grep -qF "$hs_marker" "$hs_init"; then
-    hs_present=1
-  fi
+  local config_present=0 raycast_present=0
+  [ -d "$CONFIG_DIR" ]  && config_present=1
+  [ -d "$RAYCAST_DIR" ] && raycast_present=1
 
-  if [ "$config_present" -eq 0 ] && [ -z "$raycast_gen" ] && [ "$hs_present" -eq 0 ]; then
+  if [ "$config_present" -eq 0 ] && [ "$raycast_present" -eq 0 ]; then
     info "Nothing to reset."
     return 0
   fi
 
   info "dw reset will remove:"
-  [ "$config_present" -eq 1 ] && info "  - config:      $CONFIG_DIR"
-  [ -n "$raycast_gen" ]       && info "  - raycast:     $raycast_gen"
-  [ "$hs_present" -eq 1 ]     && info "  - hammerspoon block in: $hs_init"
+  [ "$config_present" -eq 1 ]  && info "  - config:                $CONFIG_DIR"
+  [ "$raycast_present" -eq 1 ] && info "  - generated Raycast dir: $RAYCAST_DIR"
   info ""
   info "It will NOT touch:"
   info "  - the dw binary or its symlink (use ./uninstall.sh for that)"
@@ -364,19 +314,10 @@ cmd_reset() {
     rm -rf "$CONFIG_DIR"
     ok "removed $CONFIG_DIR"
   fi
-  if [ -n "$raycast_gen" ]; then
-    rm -rf "$raycast_gen"
-    ok "removed $raycast_gen"
-  fi
-  if [ "$hs_present" -eq 1 ]; then
-    local tmp; tmp=$(mktemp)
-    awk -v s="$hs_marker" -v e="-- dw:end" '
-      $0 ~ s {skip=1; next}
-      $0 ~ e {skip=0; next}
-      !skip
-    ' "$hs_init" > "$tmp"
-    mv "$tmp" "$hs_init"
-    ok "removed dw block from $hs_init (reload Hammerspoon)"
+  if [ "$raycast_present" -eq 1 ]; then
+    rm -rf "$RAYCAST_DIR"
+    rmdir "$DW_DOCS_DIR" 2>/dev/null || true
+    ok "removed $RAYCAST_DIR"
   fi
 
   info ""
@@ -405,37 +346,43 @@ cmd_share() {
   done < <(device_names)
 }
 
-# --- Raycast: generate per-device script files + add directory ----------------
+# Lives under ~/Documents/ so the directory is visible to Finder; Raycast's
+# "Add Script Directory" picker can't navigate to ~/.config (hidden).
+DW_DOCS_DIR="$HOME/Documents/dw"
+RAYCAST_DIR="$DW_DOCS_DIR/raycast"
+
+# Bash 3.2 compatible (no ${var^}).
+capitalize() {
+  local s="$1" first rest
+  first=$(printf '%s' "$s" | head -c 1 | tr '[:lower:]' '[:upper:]')
+  rest=$(printf '%s' "$s" | tail -c +2)
+  printf '%s%s' "$first" "$rest"
+}
 
 generate_raycast_scripts() {
   read_config
-  local rd dir td name code title
-  rd="$(repo_dir)"
-  dir="$rd/bindings/raycast/generated"
-  rm -rf "$dir"
-  mkdir -p "$dir"
+  rm -rf "$RAYCAST_DIR"
+  mkdir -p "$RAYCAST_DIR"
+  local td name code display
   td="$(this_device)"
-
   while IFS= read -r name; do
     [ "$name" = "$td" ] && continue
     code="$(input_for "$name")"
-    title="dw $name"
-    cat > "$dir/dw-$name.sh" <<EOF
+    display="$(capitalize "$name")"
+    cat > "$RAYCAST_DIR/dw-$name.sh" <<EOF
 #!/usr/bin/env bash
 # @raycast.schemaVersion 1
-# @raycast.title $title
+# @raycast.title dw → $display
 # @raycast.mode silent
 # @raycast.icon 🖥
 # @raycast.packageName Desk Switch
-# @raycast.description Switch the monitor to '$name' (VCP input $code).
+# @raycast.description VCP input $code on the configured display.
 
 export PATH="/opt/homebrew/bin:\$HOME/bin:\$HOME/.local/bin:\$PATH"
 exec dw "$name"
 EOF
-    chmod +x "$dir/dw-$name.sh"
+    chmod +x "$RAYCAST_DIR/dw-$name.sh"
   done < <(device_names)
-
-  printf '%s' "$dir"
 }
 
 setup_raycast() {
@@ -443,96 +390,48 @@ setup_raycast() {
     die "Raycast not found. Install (raycast.com or 'brew install --cask raycast') and re-run."
   fi
   read_config
-  local dir; dir="$(generate_raycast_scripts)"
 
-  ok "Generated $(ls "$dir" | wc -l | tr -d ' ') Raycast script command(s) in:"
-  info "  $dir"
+  generate_raycast_scripts
+  local count
+  count="$(ls "$RAYCAST_DIR" 2>/dev/null | wc -l | tr -d ' ')"
+  ok "Generated $count Raycast script command(s) in:"
+  info "  $RAYCAST_DIR"
   info ""
-  printf '%s' "$dir" | pbcopy
-  ok "Path copied to clipboard."
+  info "Commands generated:"
+  for f in "$RAYCAST_DIR"/*.sh; do
+    [ -e "$f" ] || break
+    local title
+    title="$(grep '@raycast.title' "$f" | sed 's/.*@raycast.title //')"
+    info "  🖥   $title"
+  done
   info ""
-  info "Add it to Raycast (one-time):"
-  info "  Settings (⌘,) → Extensions → Script Commands → '+' → Add Script Directory"
-  info "  Paste with ⌘V and confirm."
+
+  info "FIRST-TIME SETUP (only needed once on this Mac):"
+  info "  1. Raycast Settings (⌘,) → Extensions → Script Commands"
+  info "  2. Click '+' → Add Script Directory"
+  info "  3. In the file picker, navigate to:  Documents → dw → raycast"
+  info "       (full path: $RAYCAST_DIR)"
+  info "  4. Click 'Open'"
   info ""
-  info "After that, type 'dw' in Raycast to see all devices."
+  info "After that, every 'dw setup raycast' regenerates the scripts here"
+  info "and Raycast picks up the changes automatically — no more clicking."
+  info ""
+  info "Type 'dw' in Raycast → autocomplete will list every device."
   open "raycast://"
-}
-
-setup_hammerspoon() {
-  if [ ! -d /Applications/Hammerspoon.app ] && [ ! -d "$HOME/.hammerspoon" ]; then
-    die "Hammerspoon not detected. Install (hammerspoon.org or 'brew install --cask hammerspoon') and re-run."
-  fi
-  read_config
-
-  local hs_dir="$HOME/.hammerspoon"
-  local init="$hs_dir/init.lua"
-  mkdir -p "$hs_dir"
-  [ -f "$init" ] || : > "$init"
-
-  local dw_path
-  dw_path="$(command -v dw || true)"
-  [ -n "$dw_path" ] || die "dw not on PATH yet. Run install.sh first."
-  if [ -L "$dw_path" ]; then
-    local resolved; resolved="$(readlink "$dw_path")"
-    case "$resolved" in
-      /*) dw_path="$resolved" ;;
-      *)  dw_path="$(cd "$(dirname "$dw_path")" && cd "$(dirname "$resolved")" && pwd)/$(basename "$resolved")" ;;
-    esac
-  fi
-
-  local marker_start="-- dw:start (managed by 'dw setup hammerspoon')"
-  local marker_end="-- dw:end"
-  if grep -qF "$marker_start" "$init"; then
-    info "Replacing existing dw block in $init"
-    local tmp; tmp=$(mktemp)
-    awk -v s="$marker_start" -v e="$marker_end" '
-      $0 ~ s {skip=1; next}
-      $0 ~ e {skip=0; next}
-      !skip
-    ' "$init" > "$tmp"
-    mv "$tmp" "$init"
-  fi
-
-  cat >> "$init" <<EOF
-
-$marker_start (do not edit by hand)
-do
-  local DW_BIN = "$dw_path"
-  hs.hotkey.bind({"cmd", "ctrl"}, "\\\\", function()
-    local task = hs.task.new(DW_BIN, function(exitCode, _, stdErr)
-      if exitCode == 0 then
-        hs.alert.show("dw: flipped")
-      else
-        hs.alert.show("dw failed:\\n" .. (stdErr or "(no stderr)"))
-      end
-    end, {})
-    task:start()
-  end)
-end
-$marker_end
-EOF
-
-  ok "Wrote Hammerspoon binding to $init"
-  info "Hotkey: ⌘⌃\\\\ (Cmd+Ctrl+Backslash). Reload via menubar → Reload Config."
-  info ""
-  info "With multiple devices the single hotkey runs 'dw' (which prints the list"
-  info "for 3+ devices). For per-device hotkeys, edit the block in $init."
 }
 
 cmd_setup() {
   local target="${1:-}"
   case "$target" in
-    raycast)     setup_raycast ;;
-    hammerspoon) setup_hammerspoon ;;
+    raycast) setup_raycast ;;
     ""|menu)
-      info "Available setup targets:"
-      [ -d /Applications/Raycast.app ]     && info "  raycast      (detected)"     || info "  raycast      (NOT detected)"
-      [ -d /Applications/Hammerspoon.app ] && info "  hammerspoon  (detected)"     || info "  hammerspoon  (NOT detected)"
-      info ""
-      info "Run: dw setup <target>"
+      if [ -d /Applications/Raycast.app ]; then
+        info "Raycast detected. Run: dw setup raycast"
+      else
+        info "Raycast not detected. Install raycast.com or 'brew install --cask raycast'."
+      fi
       ;;
-    *) die "unknown setup target: $target. Try: raycast, hammerspoon" ;;
+    *) die "unknown setup target: $target. Try: raycast" ;;
   esac
 }
 
@@ -548,10 +447,9 @@ USAGE
   dw remove <name>          Remove a device.
   dw use <name>             Change which device THIS Mac is.
   dw share                  Print paste-and-run install commands for other Macs.
-  dw setup [target]         Wire dw into a hotkey runner.
-                              Targets: raycast, hammerspoon
-  dw reset [--yes]          Wipe config + generated Raycast / Hammerspoon
-                              bindings (keeps binary, symlink, brew deps).
+  dw setup raycast          Generate per-device commands and wire into Raycast.
+  dw reset [--yes]          Wipe config + generated Raycast bindings (keeps
+                              binary, symlink, brew deps).
   dw list                   List displays + show config.
   dw status                 Show current config.
   dw help                   This message.

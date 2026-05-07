@@ -41,13 +41,11 @@ done
 [ -n "$THIS_DEVICE" ] || die "missing --this <device-name>"
 [ -n "$DEVICES_ARG" ] || die "missing --devices 'n=v,n=v,...'"
 
-# --- preflight ---
 [ "$(uname -s)" = "Darwin" ]  || die "macOS only — got $(uname -s)"
 [ "$(uname -m)" = "arm64" ]   || die "Apple Silicon required — got $(uname -m)"
 command -v git >/dev/null     || die "git is required"
 command -v brew >/dev/null    || die "Homebrew is required (https://brew.sh)"
 
-# --- clone or update repo ---
 if [ -d "$INSTALL_DIR/.git" ]; then
   info "Updating existing checkout at $INSTALL_DIR..."
   git -C "$INSTALL_DIR" fetch --quiet origin
@@ -59,15 +57,12 @@ else
 fi
 ok "repo at $INSTALL_DIR"
 
-# --- run install.sh (handles brew deps + symlink) ---
 "$INSTALL_DIR/install.sh"
 
-# --- write config ---
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/dw"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 mkdir -p "$CONFIG_DIR"
 
-# Convert "n=v,n=v" → JSON object via jq.
 DEVICES_JSON='{}'
 IFS=',' read -ra PAIRS <<< "$DEVICES_ARG"
 for pair in "${PAIRS[@]}"; do
@@ -79,7 +74,6 @@ for pair in "${PAIRS[@]}"; do
     | jq --arg n "$name" --argjson c "$code" '. + {($n): {input: $c}}')
 done
 
-# Verify --this is in the device list.
 printf '%s' "$DEVICES_JSON" | jq -e --arg n "$THIS_DEVICE" '.[$n]' >/dev/null \
   || die "--this '$THIS_DEVICE' is not in the --devices list"
 
@@ -92,7 +86,6 @@ jq -n \
   > "$CONFIG_FILE"
 ok "wrote $CONFIG_FILE"
 
-# --- optional: register Raycast scripts if Raycast is installed ---
 if [ -d /Applications/Raycast.app ]; then
   info ""
   info "Raycast detected — generating per-device script commands."

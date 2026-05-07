@@ -1,8 +1,7 @@
 # desk-switch
 
-Flip a DDC-capable external monitor between **two or more Macs** sharing it.
-Type `dw` in Raycast / Spotlight, or hit a global hotkey, and the monitor
-switches.
+Flip a DDC-capable external monitor between **two or more Macs** sharing
+it. Type `dw` in Raycast and the monitor switches.
 
 ```
 dw                       # toggle (with 2 devices) or list (with 3+)
@@ -13,7 +12,6 @@ dw remove <name>         # drop a device
 dw use <name>            # change which device THIS Mac is
 dw share                 # generate one-paste install commands for other Macs
 dw setup raycast         # register per-device commands in Raycast
-dw setup hammerspoon     # write a Hammerspoon hotkey binding
 dw reset                 # wipe config + generated bindings (start fresh)
 dw status                # show config
 dw list                  # list displays + show config
@@ -41,6 +39,7 @@ so any `dw <name>` call switches the monitor instantly.
   entry-level M1 / base M2 Macs is **not** DDC-capable — use USB‑C or
   Thunderbolt instead)
 - Homebrew
+- Raycast (for the hotkey UI)
 
 ## Install on the main Mac
 
@@ -84,47 +83,33 @@ $ dw share
 
   bash <(curl -fsSL https://raw.githubusercontent.com/.../bootstrap.sh) \
     --this macmini --devices "macbook=27,macmini=17,work=15"
-
-## On 'work':
-
-  bash <(curl -fsSL .../bootstrap.sh) --this work --devices "..."
 ```
 
 Paste the matching command on each other Mac. `bootstrap.sh` clones the
 repo, runs `install.sh`, writes the config, and (if Raycast is installed)
 generates the per-device Raycast script commands. After it finishes, that
-Mac is ready — no `init` wizard, no clicking around.
+Mac is ready — no `init` wizard.
 
-## Hotkey runner integration
+## Raycast integration
 
-```sh
-dw setup                   # show what's available on this Mac
-dw setup raycast           # generate per-device scripts + add to Raycast
-dw setup hammerspoon       # append a managed binding to ~/.hammerspoon/init.lua
-```
+`dw setup raycast` generates one Raycast script command per device into
+`~/Documents/dw/raycast/`. Each script gets a `dw → <Device>` title and a
+🖥 icon. Nothing is uploaded; nothing leaves your Mac.
 
-### Raycast (recommended)
+**One-time setup** — Raycast has no API for adding a Script Directory, so
+this single click is unavoidable:
 
-`dw setup raycast` generates one Raycast script command per device
-(`bindings/raycast/generated/dw-<name>.sh`, gitignored), copies the
-directory path to your clipboard, and opens Raycast. One-time: paste the
-directory into *Raycast Settings → Extensions → Script Commands → '+' →
-Add Script Directory*. After that, type **`dw`** in Raycast to see all
-devices.
+1. Run `dw setup raycast` — opens Raycast.
+2. Raycast Settings (⌘,) → Extensions → Script Commands → `+` →
+   *Add Script Directory*.
+3. In the file picker, navigate to **Documents → dw → raycast** and click
+   *Open*.
 
-When you `dw add <name>`, just re-run `dw setup raycast` — the new script
-appears in Raycast automatically (the directory's the same; Raycast just
-sees a new file).
+After this one-time step, every `dw add`, `dw remove`, or `dw setup raycast`
+regenerates the scripts in place and Raycast picks them up automatically —
+no more clicking, ever.
 
-### Hammerspoon
-
-`dw setup hammerspoon` appends a managed block to `~/.hammerspoon/init.lua`
-that binds **⌘⌃\\** (Cmd+Ctrl+Backslash) to `dw`. The block is wrapped in
-`-- dw:start` / `-- dw:end` markers and is replaced cleanly on every
-re-run. Reload Hammerspoon (menubar icon → Reload Config) once after setup.
-
-With 3+ devices, the single hotkey runs `dw` (which prints the device list);
-for per-device hotkeys, edit the generated block.
+In Raycast: type `dw` and autocomplete lists every device.
 
 ## Resetting / starting over
 
@@ -136,10 +121,9 @@ dw reset --yes     # skip confirmation
 `dw reset` removes:
 
 - `~/.config/dw/` (the device config)
-- `bindings/raycast/generated/` (per-device Raycast scripts)
-- The managed `-- dw:start` … `-- dw:end` block in `~/.hammerspoon/init.lua`
+- `~/Documents/dw/raycast/` (generated Raycast script commands)
 
-It deliberately **does not** touch:
+It does **not** touch:
 
 - the `dw` binary or its symlink — use `./uninstall.sh` for that
 - Homebrew deps (`m1ddc`, `jq`)
@@ -148,13 +132,6 @@ It deliberately **does not** touch:
 
 After a reset, run `dw init` to set up fresh — or, on a secondary Mac,
 paste the matching `dw share` line from your main Mac.
-
-### Shortcuts
-
-Apple Shortcuts has no public API for creating shortcuts from the CLI, so
-this is a manual one-time step — see
-[`bindings/shortcuts/README.md`](./bindings/shortcuts/README.md). After
-setup, typing "dw" in Spotlight runs it.
 
 ## Troubleshooting
 
@@ -166,17 +143,6 @@ setup, typing "dw" in Spotlight runs it.
   `dw remove <name>` + `dw add <name> <new-code>`).
 - **Monitor goes dark with no signal** — You wrote a code for an unused
   input. Recover with the monitor's joystick, then fix the config.
-- **Raycast install link says "script not found"** — The script must be
-  reachable on the public web. Make sure your repo is public and the
-  branch is `main` (the default `dw setup raycast` uses).
-
-## Roadmap
-
-- Intel Mac support via `ddcctl` fallback.
-- Homebrew tap (`brew install <tap>/desk-switch`).
-- Multi-display support (more than one external monitor per Mac).
-- Optional cross-Mac LAN sync (one keypress flips monitor *and* tells the
-  target Mac to wake / grab focus).
 
 ## License
 
