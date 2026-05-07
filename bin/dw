@@ -318,6 +318,73 @@ cmd_use() {
   ok "this_device → $name"
 }
 
+cmd_reset() {
+  local yes=0
+  case "${1:-}" in --yes|-y) yes=1 ;; esac
+
+  # Inventory what reset would touch.
+  local config_present=0 raycast_gen="" hs_present=0
+  [ -d "$CONFIG_DIR" ]                                        && config_present=1
+  local rd; rd="$(repo_dir 2>/dev/null || true)"
+  if [ -n "$rd" ] && [ -d "$rd/bindings/raycast/generated" ]; then
+    raycast_gen="$rd/bindings/raycast/generated"
+  fi
+  local hs_init="$HOME/.hammerspoon/init.lua"
+  local hs_marker="-- dw:start (managed by 'dw setup hammerspoon')"
+  if [ -f "$hs_init" ] && grep -qF "$hs_marker" "$hs_init"; then
+    hs_present=1
+  fi
+
+  if [ "$config_present" -eq 0 ] && [ -z "$raycast_gen" ] && [ "$hs_present" -eq 0 ]; then
+    info "Nothing to reset."
+    return 0
+  fi
+
+  info "dw reset will remove:"
+  [ "$config_present" -eq 1 ] && info "  - config:      $CONFIG_DIR"
+  [ -n "$raycast_gen" ]       && info "  - raycast:     $raycast_gen"
+  [ "$hs_present" -eq 1 ]     && info "  - hammerspoon block in: $hs_init"
+  info ""
+  info "It will NOT touch:"
+  info "  - the dw binary or its symlink (use ./uninstall.sh for that)"
+  info "  - Homebrew deps (m1ddc, jq)"
+  info "  - the Raycast 'Add Script Directory' entry inside Raycast Settings"
+  info ""
+
+  if [ "$yes" -ne 1 ]; then
+    local reply=""
+    if [ -t 0 ]; then read -r -p "Continue? [y/N] " reply || true; fi
+    case "${reply:-n}" in
+      y|Y|yes|YES|Yes) ;;
+      *) info "Aborted."; return 0 ;;
+    esac
+  fi
+
+  if [ "$config_present" -eq 1 ]; then
+    rm -rf "$CONFIG_DIR"
+    ok "removed $CONFIG_DIR"
+  fi
+  if [ -n "$raycast_gen" ]; then
+    rm -rf "$raycast_gen"
+    ok "removed $raycast_gen"
+  fi
+  if [ "$hs_present" -eq 1 ]; then
+    local tmp; tmp=$(mktemp)
+    awk -v s="$hs_marker" -v e="-- dw:end" '
+      $0 ~ s {skip=1; next}
+      $0 ~ e {skip=0; next}
+      !skip
+    ' "$hs_init" > "$tmp"
+    mv "$tmp" "$hs_init"
+    ok "removed dw block from $hs_init (reload Hammerspoon)"
+  fi
+
+  info ""
+  info "Done. To start fresh:"
+  info "  dw init                              # full wizard on this Mac"
+  info "  # or paste the matching 'dw share' line from another Mac"
+}
+
 cmd_share() {
   read_config
   local td bs_url devices_arg
@@ -483,6 +550,8 @@ USAGE
   dw share                  Print paste-and-run install commands for other Macs.
   dw setup [target]         Wire dw into a hotkey runner.
                               Targets: raycast, hammerspoon
+  dw reset [--yes]          Wipe config + generated Raycast / Hammerspoon
+                              bindings (keeps binary, symlink, brew deps).
   dw list                   List displays + show config.
   dw status                 Show current config.
   dw help                   This message.
@@ -505,6 +574,7 @@ main() {
     use)               shift || true; cmd_use    "${1:-}" ;;
     share)             cmd_share ;;
     setup)             shift || true; cmd_setup  "${1:-}" ;;
+    reset)             shift || true; cmd_reset  "${1:-}" ;;
     status)            cmd_status ;;
     list|ls)           cmd_list ;;
     -h|--help|help)    cmd_help ;;

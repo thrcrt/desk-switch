@@ -14,6 +14,7 @@ dw use <name>            # change which device THIS Mac is
 dw share                 # generate one-paste install commands for other Macs
 dw setup raycast         # register per-device commands in Raycast
 dw setup hammerspoon     # write a Hammerspoon hotkey binding
+dw reset                 # wipe config + generated bindings (start fresh)
 dw status                # show config
 dw list                  # list displays + show config
 ```
@@ -124,6 +125,29 @@ re-run. Reload Hammerspoon (menubar icon → Reload Config) once after setup.
 
 With 3+ devices, the single hotkey runs `dw` (which prints the device list);
 for per-device hotkeys, edit the generated block.
+
+## Resetting / starting over
+
+```sh
+dw reset           # interactive: shows what'll be removed, asks to confirm
+dw reset --yes     # skip confirmation
+```
+
+`dw reset` removes:
+
+- `~/.config/dw/` (the device config)
+- `bindings/raycast/generated/` (per-device Raycast scripts)
+- The managed `-- dw:start` … `-- dw:end` block in `~/.hammerspoon/init.lua`
+
+It deliberately **does not** touch:
+
+- the `dw` binary or its symlink — use `./uninstall.sh` for that
+- Homebrew deps (`m1ddc`, `jq`)
+- the Raycast "Add Script Directory" entry inside Raycast Settings (the
+  directory will just be empty until you re-run `dw setup raycast`)
+
+After a reset, run `dw init` to set up fresh — or, on a secondary Mac,
+paste the matching `dw share` line from your main Mac.
 
 ### Shortcuts
 
