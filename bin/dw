@@ -1,0 +1,372 @@
+#!/usr/bin/env bash
+# dw — flip a DDC-capable monitor between two Macs sharing it.
+# Requires: m1ddc, jq (brew install m1ddc jq)
+
+set -euo pipefail
+
+# Make sure brew-managed deps are findable when invoked from Raycast,
+# Hammerspoon, Shortcuts, or any other launcher that strips PATH.
+export PATH="/opt/homebrew/bin:$HOME/bin:$HOME/.local/bin:$PATH"
+
+VERSION="0.2.0"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/dw"
+LEGACY_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/desk-switch"
+CONFIG_FILE="$CONFIG_DIR/config.json"
+
+err()  { printf 'dw: %s\n' "$*" >&2; }
+die()  { err "$*"; exit 1; }
+info() { printf '%s\n' "$*"; }
+ok()   { printf '✓ %s\n' "$*"; }
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1 (try: brew install $1)"
+}
+
+require_cmd m1ddc
+require_cmd jq
+
+# Migrate legacy ~/.config/desk-switch → ~/.config/dw on first run.
+if [ ! -d "$CONFIG_DIR" ] && [ -d "$LEGACY_CONFIG_DIR" ]; then
+  mv "$LEGACY_CONFIG_DIR" "$CONFIG_DIR"
+fi
+
+config_exists() { [ -f "$CONFIG_FILE" ]; }
+
+read_config() {
+  config_exists || die "no config at $CONFIG_FILE — run 'dw init' first"
+  jq -e . "$CONFIG_FILE" >/dev/null 2>&1 || die "config at $CONFIG_FILE is not valid JSON"
+}
+
+get_cfg() { jq -r "$1" "$CONFIG_FILE"; }
+
+list_displays() { m1ddc display list 2>&1; }
+
+prompt_default() {
+  local prompt="$1" default="$2" reply=""
+  if [ -t 0 ]; then
+    read -r -p "$prompt [$default]: " reply || true
+  fi
+  printf '%s\n' "${reply:-$default}"
+}
+
+prompt_yes() {
+  local prompt="$1" reply=""
+  if [ -t 0 ]; then
+    read -r -p "$prompt [Y/n] " reply || true
+  fi
+  case "${reply:-y}" in
+    y|Y|yes|YES|Yes) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_int() { [[ "$1" =~ ^[0-9]+$ ]]; }
+
+# Resolve the repo directory by following the symlink chain back to this
+# file's actual location, then return the parent of bin/.
+repo_dir() {
+  local src="${BASH_SOURCE[0]}"
+  while [ -L "$src" ]; do
+    local target
+    target="$(readlink "$src")"
+    case "$target" in
+      /*) src="$target" ;;
+      *)  src="$(cd "$(dirname "$src")" && pwd)/$target" ;;
+    esac
+  done
+  cd "$(dirname "$src")/.." && pwd
+}
+
+# Build a GitHub raw URL for a file in this repo, parsing
+# `git remote get-url origin`. Falls back to a sensible default if not in a
+# git checkout.
+github_raw_url() {
+  local path="$1"
+  local rd
+  rd="$(repo_dir 2>/dev/null || true)"
+  local origin=""
+  if [ -n "$rd" ] && [ -d "$rd/.git" ]; then
+    origin="$(cd "$rd" && git remote get-url origin 2>/dev/null || true)"
+  fi
+  local slug=""
+  case "$origin" in
+    git@github.com:*)         slug="${origin#git@github.com:}"; slug="${slug%.git}" ;;
+    https://github.com/*)     slug="${origin#https://github.com/}"; slug="${slug%.git}" ;;
+    *)                        slug="thrcrt/desk-switch" ;;
+  esac
+  printf 'https://raw.githubusercontent.com/%s/main/%s\n' "$slug" "$path"
+}
+
+print_input_codes() {
+  cat <<'EOF'
+  Common VCP 0x60 input codes:
+    15  DisplayPort 1
+    16  DisplayPort 2
+    17  HDMI 1
+    18  HDMI 2
+    27  USB-C
+  (Some monitors use vendor-specific values; if these don't work, check your
+   monitor's manual or experiment with values 1-30.)
+EOF
+}
+
+cmd_init() {
+  info "dw init — set this Mac up."
+  info ""
+  info "Displays detected by m1ddc:"
+  list_displays | sed 's/^/  /'
+  info ""
+
+  local display_n
+  display_n=$(prompt_default "Which display number to control?" "1")
+  is_int "$display_n" || die "display number must be numeric"
+
+  if ! prompt_yes "Is the monitor currently displaying THIS Mac?"; then
+    die "Switch the monitor to THIS Mac (with its joystick/OSD), then re-run init."
+  fi
+
+  info ""
+  print_input_codes
+  info ""
+
+  local this_label this_input other_label other_input
+  this_label=$(prompt_default  "Label for THIS Mac" "this-mac")
+  this_input=$(prompt_default  "VCP input code for THIS Mac" "27")
+  is_int "$this_input"  || die "input code must be numeric"
+
+  other_label=$(prompt_default "Label for the OTHER Mac" "other-mac")
+  other_input=$(prompt_default "VCP input code for the OTHER Mac" "17")
+  is_int "$other_input" || die "input code must be numeric"
+
+  [ "$this_label" = "$other_label" ] && die "labels must differ"
+  [ "$this_input" = "$other_input" ] && die "input codes must differ"
+
+  mkdir -p "$CONFIG_DIR"
+  local tmp; tmp=$(mktemp)
+  jq -n \
+    --argjson v 1 \
+    --arg    dsel "$display_n" \
+    --arg    tlbl "$this_label"  --argjson tin "$this_input" \
+    --arg    olbl "$other_label" --argjson oin "$other_input" \
+    '{
+      version: $v,
+      display: { selector: $dsel },
+      sides: {
+        this:  { label: $tlbl, input: $tin },
+        other: { label: $olbl, input: $oin }
+      }
+    }' > "$tmp"
+  mv "$tmp" "$CONFIG_FILE"
+
+  info ""
+  info "Wrote $CONFIG_FILE"
+  info ""
+  info "Try:"
+  info "  dw status"
+  info "  dw                 # toggle to '$other_label'"
+  info "  dw $this_label      # explicit"
+  info "  dw $other_label     # explicit"
+  info ""
+  info "Run 'dw setup raycast' (or 'hammerspoon') to wire dw into a hotkey runner."
+  info "Don't forget to install dw on the OTHER Mac too."
+}
+
+cmd_status() {
+  read_config
+  info "Display selector: $(get_cfg '.display.selector')"
+  info "This Mac:   $(get_cfg '.sides.this.label')   (VCP input $(get_cfg '.sides.this.input'))   <-- assumed active"
+  info "Other Mac:  $(get_cfg '.sides.other.label')  (VCP input $(get_cfg '.sides.other.input'))"
+  info ""
+  info "Run 'dw' to flip the monitor."
+}
+
+cmd_list() {
+  info "Connected displays (m1ddc):"
+  list_displays
+  info ""
+  if config_exists; then
+    info "Configured selector: $(get_cfg '.display.selector')"
+    info "  this  = $(get_cfg '.sides.this.label')   input=$(get_cfg '.sides.this.input')"
+    info "  other = $(get_cfg '.sides.other.label')  input=$(get_cfg '.sides.other.input')"
+  else
+    info "(no config — run 'dw init')"
+  fi
+}
+
+do_switch() {
+  local sel="$1" code="$2" label="$3"
+  is_int "$code" || die "input code '$code' is not numeric"
+  info "Switching display '$sel' to '$label' (VCP 0x60 = $code)..."
+  if ! m1ddc display "$sel" set input "$code"; then
+    die "m1ddc could not write input. Verify selector '$sel' (try 'dw list') and that the monitor supports DDC input switching."
+  fi
+}
+
+cmd_switch_to() {
+  read_config
+  local target="$1"
+  local sel this_label this_in other_label other_in
+  sel=$(get_cfg '.display.selector')
+  this_label=$(get_cfg '.sides.this.label')
+  this_in=$(get_cfg '.sides.this.input')
+  other_label=$(get_cfg '.sides.other.label')
+  other_in=$(get_cfg '.sides.other.input')
+
+  case "$target" in
+    "$this_label")  do_switch "$sel" "$this_in"  "$this_label" ;;
+    "$other_label") do_switch "$sel" "$other_in" "$other_label" ;;
+    *) die "unknown label '$target'. Configured: '$this_label', '$other_label'." ;;
+  esac
+}
+
+cmd_toggle() {
+  read_config
+  # Implicit-context model: if you can read this shell, the monitor is on THIS
+  # Mac's input. m1ddc 1.2.0 cannot read VCP 0x60, so we don't try to detect.
+  local sel other_label other_in
+  sel=$(get_cfg '.display.selector')
+  other_label=$(get_cfg '.sides.other.label')
+  other_in=$(get_cfg '.sides.other.input')
+  do_switch "$sel" "$other_in" "$other_label"
+}
+
+# --- setup subcommand: wire dw into hotkey runners ----------------------------
+
+setup_raycast() {
+  if [ ! -d /Applications/Raycast.app ]; then
+    die "Raycast not found at /Applications/Raycast.app. Install it (raycast.com or 'brew install --cask raycast'), then re-run."
+  fi
+  local raw_url deeplink
+  raw_url="$(github_raw_url 'bindings/raycast/dw-toggle.sh')"
+  deeplink="raycast://script-commands/install?url=$(printf %s "$raw_url" | jq -sRr @uri)"
+
+  info "Opening Raycast to install the 'dw' script command."
+  info ""
+  info "  Source: $raw_url"
+  info ""
+  info "When Raycast appears, click 'Install'. After install, type 'dw' in"
+  info "Raycast and hit Enter to flip the monitor. To assign a global hotkey:"
+  info "Raycast → Extensions → Script Commands → dw → Record Hotkey."
+  open "$deeplink"
+}
+
+setup_hammerspoon() {
+  if [ ! -d /Applications/Hammerspoon.app ] && [ ! -d "$HOME/.hammerspoon" ]; then
+    die "Hammerspoon not detected. Install it (hammerspoon.org or 'brew install --cask hammerspoon'), then re-run."
+  fi
+
+  local hs_dir="$HOME/.hammerspoon"
+  local init="$hs_dir/init.lua"
+  mkdir -p "$hs_dir"
+  [ -f "$init" ] || : > "$init"
+
+  local dw_path
+  dw_path="$(command -v dw || true)"
+  [ -n "$dw_path" ] || die "dw not on PATH yet. Run install.sh first."
+  if [ -L "$dw_path" ]; then
+    local resolved
+    resolved="$(readlink "$dw_path")"
+    case "$resolved" in
+      /*) dw_path="$resolved" ;;
+      *)  dw_path="$(cd "$(dirname "$dw_path")" && cd "$(dirname "$resolved")" && pwd)/$(basename "$resolved")" ;;
+    esac
+  fi
+
+  local marker_start="-- dw:start (managed by 'dw setup hammerspoon')"
+  local marker_end="-- dw:end"
+
+  if grep -qF "$marker_start" "$init"; then
+    info "Existing dw block found in $init — replacing it."
+    local tmp; tmp=$(mktemp)
+    awk -v s="$marker_start" -v e="$marker_end" '
+      $0 ~ s {skip=1; next}
+      $0 ~ e {skip=0; next}
+      !skip
+    ' "$init" > "$tmp"
+    mv "$tmp" "$init"
+  fi
+
+  cat >> "$init" <<EOF
+
+$marker_start (do not edit by hand)
+do
+  local DW_BIN = "$dw_path"
+  hs.hotkey.bind({"cmd", "ctrl"}, "\\\\", function()
+    local task = hs.task.new(DW_BIN, function(exitCode, _, stdErr)
+      if exitCode == 0 then
+        hs.alert.show("dw: flipped")
+      else
+        hs.alert.show("dw failed:\\n" .. (stdErr or "(no stderr)"))
+      end
+    end, {})
+    task:start()
+  end)
+end
+$marker_end
+EOF
+
+  ok "Wrote Hammerspoon binding to $init"
+  info ""
+  info "Hotkey:  ⌘⌃\\\\ (cmd-ctrl-backslash)"
+  info "Reload Hammerspoon: menubar icon → Reload Config."
+}
+
+cmd_setup() {
+  local target="${1:-}"
+  case "$target" in
+    raycast)     setup_raycast ;;
+    hammerspoon) setup_hammerspoon ;;
+    ""|menu)
+      info "Available setup targets:"
+      [ -d /Applications/Raycast.app ]     && info "  raycast      (detected: /Applications/Raycast.app)"     || info "  raycast      (NOT detected)"
+      [ -d /Applications/Hammerspoon.app ] && info "  hammerspoon  (detected: /Applications/Hammerspoon.app)" || info "  hammerspoon  (NOT detected)"
+      info ""
+      info "Run: dw setup <target>"
+      ;;
+    *) die "unknown setup target: $target. Try: raycast, hammerspoon" ;;
+  esac
+}
+
+cmd_help() {
+  cat <<EOF
+dw v$VERSION — flip a DDC-capable monitor between two Macs.
+
+USAGE
+  dw                        Toggle: switch monitor to the OTHER Mac.
+  dw <label>                Explicit switch (e.g. 'dw mac-mini').
+  dw init                   Configure THIS Mac (display + input codes).
+  dw setup [target]         Wire dw into a hotkey runner.
+                              Targets: raycast, hammerspoon
+  dw status                 Show current config.
+  dw list                   List displays + show config.
+  dw help                   This message.
+
+CONFIG
+  $CONFIG_FILE
+
+DEPENDENCIES
+  m1ddc, jq    (brew install m1ddc jq)
+
+NOTES
+  - Run 'dw init' separately on each Mac.
+  - Toggle assumes the monitor is on THIS Mac's input (true whenever you can
+    interact with this shell). Switch back from the OTHER Mac.
+  - Switches monitor input only — keyboard/mouse switching is separate.
+EOF
+}
+
+main() {
+  local cmd="${1:-}"
+  case "$cmd" in
+    ""|toggle)         cmd_toggle ;;
+    init)              cmd_init ;;
+    setup)             shift || true; cmd_setup "${1:-}" ;;
+    status)            cmd_status ;;
+    list|ls)           cmd_list ;;
+    -h|--help|help)    cmd_help ;;
+    -v|--version)      printf '%s\n' "$VERSION" ;;
+    *)                 cmd_switch_to "$cmd" ;;
+  esac
+}
+
+main "$@"

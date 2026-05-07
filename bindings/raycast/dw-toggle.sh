@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Required parameters:
 # @raycast.schemaVersion 1
-# @raycast.title Desk Switch — Toggle
+# @raycast.title dw
 # @raycast.mode silent
 #
 # Optional parameters:
@@ -9,5 +9,8 @@
 # @raycast.packageName Desk Switch
 # @raycast.description Flip the monitor between this Mac and the other one.
 
-# Adjust if you didn't symlink desk-switch onto PATH.
-exec "$HOME/desk-switch/bin/desk-switch"
+# Raycast script commands run with a stripped PATH. Make sure the brew-managed
+# binaries (m1ddc, jq, and dw's own symlink) are findable.
+export PATH="/opt/homebrew/bin:$HOME/bin:$HOME/.local/bin:$PATH"
+
+exec dw

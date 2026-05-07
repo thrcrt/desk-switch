@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — set up desk-switch on this Mac.
+# install.sh — set up dw on this Mac.
 #
 # Idempotent: checks each step and skips work that's already done.
 # Safe to re-run.
@@ -12,7 +12,8 @@ info() { printf '%s\n' "$*"; }
 ok()   { printf '✓ %s\n' "$*"; }
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN_SRC="$REPO_DIR/bin/desk-switch"
+BIN_SRC="$REPO_DIR/bin/dw"
+LEGACY_BIN_SRC="$REPO_DIR/bin/desk-switch"
 
 # --- preflight checks ---
 [ "$(uname -s)" = "Darwin" ] || die "macOS only — got $(uname -s)"
@@ -38,15 +39,28 @@ for pkg in m1ddc jq; do
   fi
 done
 
-# --- if desk-switch already resolves on PATH to our binary, we're done ---
-existing="$(command -v desk-switch 2>/dev/null || true)"
+# --- migrate any legacy `desk-switch` symlinks pointing at this repo ---
+for d in /opt/homebrew/bin "$HOME/bin" "$HOME/.local/bin" /usr/local/bin; do
+  legacy="$d/desk-switch"
+  if [ -L "$legacy" ]; then
+    target="$(readlink "$legacy")"
+    if [ "$target" = "$LEGACY_BIN_SRC" ] || [ "$target" = "$BIN_SRC" ]; then
+      rm "$legacy"
+      ok "removed legacy symlink: $legacy"
+    fi
+  fi
+done
+
+# --- if dw already resolves on PATH to our binary, we're done ---
+existing="$(command -v dw 2>/dev/null || true)"
 if [ -n "$existing" ] && [ "$(readlink "$existing" 2>/dev/null)" = "$BIN_SRC" ]; then
-  ok "desk-switch already on PATH: $existing"
+  ok "dw already on PATH: $existing"
   info ""
   info "Already installed. Next:"
-  info "  desk-switch init       # configure THIS Mac"
-  info "  desk-switch status     # show config"
-  info "  desk-switch            # flip the monitor"
+  info "  dw init                # configure THIS Mac"
+  info "  dw setup raycast       # wire dw into Raycast (recommended)"
+  info "  dw setup hammerspoon   # ...or Hammerspoon"
+  info "  dw                     # flip the monitor"
   exit 0
 fi
 
@@ -67,9 +81,9 @@ choose_link_dir() {
 LINK_DIR="$(choose_link_dir || true)"
 if [ -z "${LINK_DIR:-}" ]; then
   die "no writable PATH dir found. Add ~/bin to PATH and re-run, or symlink manually:
-    ln -s '$BIN_SRC' /opt/homebrew/bin/desk-switch"
+    ln -s '$BIN_SRC' /opt/homebrew/bin/dw"
 fi
-LINK_PATH="$LINK_DIR/desk-switch"
+LINK_PATH="$LINK_DIR/dw"
 
 # --- symlink (idempotent, refuses to clobber unrelated files) ---
 if [ -L "$LINK_PATH" ] && [ "$(readlink "$LINK_PATH")" = "$BIN_SRC" ]; then
@@ -83,13 +97,14 @@ else
 fi
 
 # --- verify ---
-if ! command -v desk-switch >/dev/null 2>&1; then
-  die "'desk-switch' not on PATH after install. Try opening a fresh terminal."
+if ! command -v dw >/dev/null 2>&1; then
+  die "'dw' not on PATH after install. Try opening a fresh terminal."
 fi
-ok "desk-switch on PATH: $(command -v desk-switch)"
+ok "dw on PATH: $(command -v dw)"
 
 info ""
 info "Done. Next:"
-info "  desk-switch init       # configure THIS Mac"
-info "  desk-switch status     # show config"
-info "  desk-switch            # flip the monitor"
+info "  dw init                # configure THIS Mac"
+info "  dw setup raycast       # wire dw into Raycast (recommended)"
+info "  dw setup hammerspoon   # ...or Hammerspoon"
+info "  dw                     # flip the monitor"
