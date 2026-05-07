@@ -100,30 +100,89 @@ port_name_for_code() {
   esac
 }
 
+# Arrow-key menu picker. Sets SELECTED_INDEX (0-based) on success.
+# Args: default-index, prompt-line, then options.
+# Falls back to a numbered prompt if stdin/stdout isn't a TTY.
+menu_select() {
+  local default="${1:-0}" prompt="$2"
+  shift 2
+  local options=("$@") n=${#options[@]}
+
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    local i
+    printf '%s\n' "$prompt"
+    for ((i=0; i<n; i++)); do printf '  %d. %s\n' $((i+1)) "${options[i]}"; done
+    local reply=""
+    read -r -p "  Choice [$((default+1))]: " reply || true
+    reply="${reply:-$((default+1))}"
+    [[ "$reply" =~ ^[0-9]+$ ]] && [ "$reply" -ge 1 ] && [ "$reply" -le "$n" ] \
+      || die "invalid choice: $reply"
+    SELECTED_INDEX=$((reply - 1))
+    return 0
+  fi
+
+  local cursor=$default key c i
+  printf '%s\n' "$prompt"
+  printf '\033[?25l'
+  # EXIT-only trap: lets Ctrl+C kill the script normally while still
+  # restoring the cursor on any exit path.
+  trap 'printf "\033[?25h"' EXIT
+
+  draw() {
+    for ((i=0; i<n; i++)); do
+      if [ $i -eq $cursor ]; then
+        printf '  \033[36;1m▸\033[0m \033[1m%s\033[0m\n' "${options[i]}"
+      else
+        printf '    %s\n' "${options[i]}"
+      fi
+    done
+  }
+  draw
+
+  while true; do
+    IFS= read -rsn1 key
+    # If ESC, read the rest of the escape sequence byte-by-byte until a
+    # terminator (letter or ~). More robust than a fixed-size 2-byte read,
+    # which can race when bytes don't all arrive within the timeout.
+    if [ "$key" = $'\033' ]; then
+      while IFS= read -rsn1 -t 1 c 2>/dev/null; do
+        key="$key$c"
+        case "$c" in [A-Za-z~]) break ;; esac
+      done
+    fi
+    case "$key" in
+      $'\033[A'|$'\033OA'|k|K) cursor=$(( (cursor - 1 + n) % n )) ;;
+      $'\033[B'|$'\033OB'|j|J) cursor=$(( (cursor + 1) % n )) ;;
+      "") break ;;
+      q|Q) printf '\033[?25h'; trap - EXIT; return 1 ;;
+    esac
+    printf '\033[%dA\033[J' "$n"
+    draw
+  done
+
+  printf '\033[?25h'
+  trap - EXIT
+  SELECTED_INDEX=$cursor
+  return 0
+}
+
 # Sets globals SELECTED_PORT_CODE and SELECTED_PORT_NAME from a menu choice.
 prompt_port_choice() {
-  local default="${1:-1}" reply=""
-  printf '  Port:\n'
-  printf '    1. USB-C / Thunderbolt\n'
-  printf '    2. HDMI 1\n'
-  printf '    3. HDMI 2\n'
-  printf '    4. DisplayPort 1\n'
-  printf '    5. Custom (enter VCP code)\n'
-  if [ -t 0 ]; then read -r -p "  Choice [$default]: " reply || true; fi
-  reply="${reply:-$default}"
-  case "$reply" in
-    1) SELECTED_PORT_CODE=27; SELECTED_PORT_NAME="USB-C" ;;
-    2) SELECTED_PORT_CODE=17; SELECTED_PORT_NAME="HDMI 1" ;;
-    3) SELECTED_PORT_CODE=18; SELECTED_PORT_NAME="HDMI 2" ;;
-    4) SELECTED_PORT_CODE=15; SELECTED_PORT_NAME="DisplayPort 1" ;;
-    5)
+  local default="${1:-0}"
+  local options=("USB-C / Thunderbolt" "HDMI 1" "HDMI 2" "DisplayPort 1" "Custom (enter VCP code)")
+  menu_select "$default" "  Port:" "${options[@]}" || die "cancelled"
+  case "$SELECTED_INDEX" in
+    0) SELECTED_PORT_CODE=27; SELECTED_PORT_NAME="USB-C" ;;
+    1) SELECTED_PORT_CODE=17; SELECTED_PORT_NAME="HDMI 1" ;;
+    2) SELECTED_PORT_CODE=18; SELECTED_PORT_NAME="HDMI 2" ;;
+    3) SELECTED_PORT_CODE=15; SELECTED_PORT_NAME="DisplayPort 1" ;;
+    4)
       local code=""
       if [ -t 0 ]; then read -r -p "  Custom VCP code (1-30): " code || true; fi
       [[ "$code" =~ ^[0-9]+$ ]] || die "VCP code must be numeric"
       SELECTED_PORT_CODE="$code"
       SELECTED_PORT_NAME="VCP $code"
       ;;
-    *) die "invalid port choice: $reply" ;;
   esac
 }
 
@@ -186,7 +245,7 @@ cmd_init() {
   local this_name
   this_name=$(prompt_default "  Name" "$default_name")
   is_name "$this_name" || die "invalid name '$this_name' (use letters, digits, . _ -)"
-  prompt_port_choice 1
+  prompt_port_choice 0
   local devices_json
   devices_json=$(jq -n --arg n "$this_name" --argjson c "$SELECTED_PORT_CODE" \
                     '{($n): {input: $c}}')
@@ -205,7 +264,7 @@ cmd_init() {
     if printf '%s' "$devices_json" | jq -e --arg n "$oname" '.[$n]' >/dev/null; then
       die "device '$oname' already added"
     fi
-    prompt_port_choice 2
+    prompt_port_choice 1
     devices_json=$(printf '%s' "$devices_json" \
       | jq --arg n "$oname" --argjson c "$SELECTED_PORT_CODE" '. + {($n): {input: $c}}')
     info ""
