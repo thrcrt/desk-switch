@@ -1,19 +1,24 @@
 # desk-switch
 
-Flip a DDC-capable external monitor between two Macs sharing it. Type `dw`
-in Raycast / Spotlight, or hit a global hotkey, and the monitor switches.
+Flip a DDC-capable external monitor between **two or more Macs** sharing it.
+Type `dw` in Raycast / Spotlight, or hit a global hotkey, and the monitor
+switches.
 
 ```
-dw                       # toggle: switch monitor to the OTHER Mac
-dw <label>               # explicit switch (e.g. dw mac-mini)
-dw init                  # interactive setup (display + input codes)
-dw setup raycast         # one-click install into Raycast
+dw                       # toggle (with 2 devices) or list (with 3+)
+dw <device>              # explicit switch (e.g. dw mac-mini)
+dw init                  # interactive setup on the first Mac
+dw add <name> <input>    # add a new device to the config
+dw remove <name>         # drop a device
+dw use <name>            # change which device THIS Mac is
+dw share                 # generate one-paste install commands for other Macs
+dw setup raycast         # register per-device commands in Raycast
 dw setup hammerspoon     # write a Hammerspoon hotkey binding
 dw status                # show config
+dw list                  # list displays + show config
 ```
 
-> The repo is named `desk-switch` (the project) but the binary you run is
-> `dw` (short, fast to type).
+> The repo is named `desk-switch`. The binary you run is `dw`.
 
 ## How it works
 
@@ -23,10 +28,10 @@ the video cable. The OS can use it to change brightness, volume, and the
 [`m1ddc`](https://github.com/waydabber/m1ddc) — a small CLI that speaks
 DDC/CI on Apple Silicon — to write the input source VCP code.
 
-You install and configure `dw` on **both** Macs. Each Mac knows two input
-codes: its own, and the other one's. Running `dw` flips the monitor away
-from the current Mac to the other one. To flip back, run it on the other
-Mac (a hotkey on each side does the trick).
+You configure all your devices once on a "main" Mac, then `dw share` prints
+a one-paste install command for each other Mac. Each device knows its own
+identity (`this_device`) and the full map of devices and their input codes,
+so any `dw <name>` call switches the monitor instantly.
 
 ## Requirements
 
@@ -36,99 +41,96 @@ Mac (a hotkey on each side does the trick).
   Thunderbolt instead)
 - Homebrew
 
-## Install
+## Install on the main Mac
 
 ```sh
 git clone https://github.com/thrcrt/desk-switch.git ~/desk-switch
 cd ~/desk-switch
 ./install.sh
-```
-
-`install.sh` is idempotent and does the boring work for you:
-
-- Verifies you're on Apple Silicon macOS.
-- Checks Homebrew is present (won't auto-install it — too invasive).
-- `brew install m1ddc jq` (skips if already installed).
-- Symlinks `dw` into the first writable PATH directory it finds, preferring
-  `/opt/homebrew/bin`, falling back to `~/bin` or `~/.local/bin`.
-- Cleans up any legacy `desk-switch` symlinks left over from earlier
-  versions.
-
-Re-running it is safe — it short-circuits when everything's already in place.
-
-To remove: `./uninstall.sh` (drops the symlink and config; leaves Homebrew
-dependencies in place).
-
-## Setup
-
-On **each** Mac, with the monitor showing that Mac:
-
-```sh
 dw init
 ```
 
-The wizard asks:
+`install.sh` is idempotent — it verifies Apple Silicon, makes sure
+`m1ddc` and `jq` are installed via Homebrew, and symlinks `dw` into the
+first writable PATH dir it finds (preferring `/opt/homebrew/bin`).
 
-1. **Which display number to control?** — Usually `1`. Run `m1ddc display list`
-   to confirm.
-2. **Is the monitor currently displaying THIS Mac?** — Confirm yes.
-3. **Label for THIS Mac** — Free-form, no spaces.
-4. **VCP input code for THIS Mac** — Standard codes:
-   - `15` = DisplayPort 1
-   - `16` = DisplayPort 2
-   - `17` = HDMI 1
-   - `18` = HDMI 2
-   - `27` = USB‑C
-5. **Label and code for the OTHER Mac** — Same idea.
+`dw init` walks you through:
 
-Config is written to `~/.config/dw/config.json`.
+1. Which display number to control (usually `1`)
+2. How many devices share this monitor
+3. Each device's name + VCP input code
+4. Which device THIS Mac is
 
-### Finding the right input codes
+Standard VCP codes:
 
-If the standard codes don't switch your monitor, it may use vendor-specific
-values. Two ways to find the right one:
+| Code | Input |
+|---|---|
+| 15 | DisplayPort 1 |
+| 16 | DisplayPort 2 |
+| 17 | HDMI 1 |
+| 18 | HDMI 2 |
+| 27 | USB‑C |
 
-- **Try and see:** from the Mac currently active on the monitor, run
-  `m1ddc display 1 set input N` for `N` in 1..30. Wrong codes are no-ops;
-  the right one switches the input. If you land on a dead input, recover
-  with the monitor's physical joystick / OSD.
-- **Check the manual:** search your monitor's user guide for "DDC/CI input
-  source codes", or browse known values at
-  <https://github.com/kfix/ddcctl/issues>.
+Config goes to `~/.config/dw/config.json`.
+
+## Install on the other Macs
+
+On the **main** Mac (after `dw init`):
+
+```sh
+$ dw share
+## On 'macmini':
+
+  bash <(curl -fsSL https://raw.githubusercontent.com/.../bootstrap.sh) \
+    --this macmini --devices "macbook=27,macmini=17,work=15"
+
+## On 'work':
+
+  bash <(curl -fsSL .../bootstrap.sh) --this work --devices "..."
+```
+
+Paste the matching command on each other Mac. `bootstrap.sh` clones the
+repo, runs `install.sh`, writes the config, and (if Raycast is installed)
+generates the per-device Raycast script commands. After it finishes, that
+Mac is ready — no `init` wizard, no clicking around.
 
 ## Hotkey runner integration
 
-`dw setup` wires `dw` into a hotkey runner so you can trigger it from
-Raycast, Spotlight, or a global key.
-
 ```sh
 dw setup                   # show what's available on this Mac
-dw setup raycast           # install the Raycast script command (one-click)
+dw setup raycast           # generate per-device scripts + add to Raycast
 dw setup hammerspoon       # append a managed binding to ~/.hammerspoon/init.lua
 ```
 
 ### Raycast (recommended)
 
-`dw setup raycast` opens a Raycast install deeplink that fetches the script
-from this repo and registers it as a Raycast script command. Confirm the
-prompt → done. After that, type **`dw`** in Raycast and hit Enter to flip
-the monitor. Optionally assign a global hotkey from
-*Raycast → Extensions → Script Commands → dw → Record Hotkey*.
+`dw setup raycast` generates one Raycast script command per device
+(`bindings/raycast/generated/dw-<name>.sh`, gitignored), copies the
+directory path to your clipboard, and opens Raycast. One-time: paste the
+directory into *Raycast Settings → Extensions → Script Commands → '+' →
+Add Script Directory*. After that, type **`dw`** in Raycast to see all
+devices.
+
+When you `dw add <name>`, just re-run `dw setup raycast` — the new script
+appears in Raycast automatically (the directory's the same; Raycast just
+sees a new file).
 
 ### Hammerspoon
 
 `dw setup hammerspoon` appends a managed block to `~/.hammerspoon/init.lua`
 that binds **⌘⌃\\** (Cmd+Ctrl+Backslash) to `dw`. The block is wrapped in
-`-- dw:start` / `-- dw:end` markers and is replaced cleanly on every re-run.
-Reload Hammerspoon (menubar icon → Reload Config) once after setup. Edit
-the hotkey by changing `{"cmd", "ctrl"}, "\\"` in the generated block.
+`-- dw:start` / `-- dw:end` markers and is replaced cleanly on every
+re-run. Reload Hammerspoon (menubar icon → Reload Config) once after setup.
+
+With 3+ devices, the single hotkey runs `dw` (which prints the device list);
+for per-device hotkeys, edit the generated block.
 
 ### Shortcuts
 
 Apple Shortcuts has no public API for creating shortcuts from the CLI, so
-this remains a manual one-time step — see
-[`bindings/shortcuts/README.md`](./bindings/shortcuts/README.md).
-After setup, you can trigger it by typing "dw" in Spotlight.
+this is a manual one-time step — see
+[`bindings/shortcuts/README.md`](./bindings/shortcuts/README.md). After
+setup, typing "dw" in Spotlight runs it.
 
 ## Troubleshooting
 
@@ -136,16 +138,21 @@ After setup, you can trigger it by typing "dw" in Spotlight.
   doesn't support DDC input switching. Run `dw list` to see what `m1ddc`
   detects, and confirm with `m1ddc display 1 get luminance` that DDC reads
   work for that display.
-- **Toggle switches to the wrong input** — Re-run `dw init` and double-check
-  the input codes.
+- **Switches to the wrong input** — Re-run `dw init` (or use
+  `dw remove <name>` + `dw add <name> <new-code>`).
 - **Monitor goes dark with no signal** — You wrote a code for an unused
-  input. Recover with the monitor's joystick, then re-run `init`.
+  input. Recover with the monitor's joystick, then fix the config.
+- **Raycast install link says "script not found"** — The script must be
+  reachable on the public web. Make sure your repo is public and the
+  branch is `main` (the default `dw setup raycast` uses).
 
 ## Roadmap
 
-- v0.3: Intel Mac support via `ddcctl` fallback.
-- v0.3: Homebrew tap (`brew install <tap>/desk-switch`).
-- v0.4: Multi-display support.
+- Intel Mac support via `ddcctl` fallback.
+- Homebrew tap (`brew install <tap>/desk-switch`).
+- Multi-display support (more than one external monitor per Mac).
+- Optional cross-Mac LAN sync (one keypress flips monitor *and* tells the
+  target Mac to wake / grab focus).
 
 ## License
 

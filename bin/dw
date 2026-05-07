@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dw — flip a DDC-capable monitor between two Macs sharing it.
+# dw — flip a DDC-capable monitor between two or more Macs sharing it.
 # Requires: m1ddc, jq (brew install m1ddc jq)
 
 set -euo pipefail
@@ -8,7 +8,7 @@ set -euo pipefail
 # Hammerspoon, Shortcuts, or any other launcher that strips PATH.
 export PATH="/opt/homebrew/bin:$HOME/bin:$HOME/.local/bin:$PATH"
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/dw"
 LEGACY_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/desk-switch"
 CONFIG_FILE="$CONFIG_DIR/config.json"
@@ -25,11 +25,41 @@ require_cmd() {
 require_cmd m1ddc
 require_cmd jq
 
-# Migrate legacy ~/.config/desk-switch → ~/.config/dw on first run.
+is_int() { [[ "$1" =~ ^[0-9]+$ ]]; }
+is_name() { [[ "$1" =~ ^[a-zA-Z0-9._-]+$ ]]; }
+
+# --- legacy directory move -----------------------------------------------------
 if [ ! -d "$CONFIG_DIR" ] && [ -d "$LEGACY_CONFIG_DIR" ]; then
   mv "$LEGACY_CONFIG_DIR" "$CONFIG_DIR"
 fi
 
+# --- config v1 → v2 migration --------------------------------------------------
+# v1 schema: { sides: { this: {label, input}, other: {label, input} } }
+# v2 schema: { this_device, devices: { <name>: {input}, ... } }
+migrate_config_if_needed() {
+  [ -f "$CONFIG_FILE" ] || return 0
+  local v
+  v="$(jq -r '.version // empty' "$CONFIG_FILE" 2>/dev/null || true)"
+  [ "$v" = "1" ] || return 0
+  info "Migrating config from v1 → v2..."
+  local tmp; tmp=$(mktemp)
+  jq '
+    {
+      version: 2,
+      display: .display,
+      this_device: .sides.this.label,
+      devices: {
+        (.sides.this.label):  { input: .sides.this.input },
+        (.sides.other.label): { input: .sides.other.input }
+      }
+    }
+  ' "$CONFIG_FILE" > "$tmp"
+  mv "$tmp" "$CONFIG_FILE"
+  ok "Migrated $CONFIG_FILE"
+}
+migrate_config_if_needed
+
+# --- config helpers ------------------------------------------------------------
 config_exists() { [ -f "$CONFIG_FILE" ]; }
 
 read_config() {
@@ -39,62 +69,44 @@ read_config() {
 
 get_cfg() { jq -r "$1" "$CONFIG_FILE"; }
 
+device_names() { get_cfg '.devices | keys_unsorted[]'; }
+device_count() { jq '.devices | length' "$CONFIG_FILE"; }
+this_device()  { get_cfg '.this_device'; }
+input_for()    { jq -r --arg n "$1" '.devices[$n].input // empty' "$CONFIG_FILE"; }
+display_sel()  { get_cfg '.display.selector'; }
+
+has_device() { [ -n "$(input_for "$1")" ]; }
+
+# Atomic config write: replaces $CONFIG_FILE with new contents from a jq filter.
+write_cfg_jq() {
+  local filter="$1"
+  local tmp; tmp=$(mktemp)
+  jq "$filter" "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+}
+
+# --- DDC actions ---------------------------------------------------------------
 list_displays() { m1ddc display list 2>&1; }
 
+do_switch() {
+  local sel="$1" code="$2" label="$3"
+  is_int "$code" || die "input code '$code' is not numeric"
+  info "Switching display '$sel' → '$label' (VCP 0x60 = $code)..."
+  if ! m1ddc display "$sel" set input "$code"; then
+    die "m1ddc could not write input. Verify selector '$sel' (try 'dw list') and that the monitor supports DDC input switching."
+  fi
+}
+
+# --- prompts -------------------------------------------------------------------
 prompt_default() {
   local prompt="$1" default="$2" reply=""
-  if [ -t 0 ]; then
-    read -r -p "$prompt [$default]: " reply || true
-  fi
+  if [ -t 0 ]; then read -r -p "$prompt [$default]: " reply || true; fi
   printf '%s\n' "${reply:-$default}"
 }
 
 prompt_yes() {
   local prompt="$1" reply=""
-  if [ -t 0 ]; then
-    read -r -p "$prompt [Y/n] " reply || true
-  fi
-  case "${reply:-y}" in
-    y|Y|yes|YES|Yes) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-is_int() { [[ "$1" =~ ^[0-9]+$ ]]; }
-
-# Resolve the repo directory by following the symlink chain back to this
-# file's actual location, then return the parent of bin/.
-repo_dir() {
-  local src="${BASH_SOURCE[0]}"
-  while [ -L "$src" ]; do
-    local target
-    target="$(readlink "$src")"
-    case "$target" in
-      /*) src="$target" ;;
-      *)  src="$(cd "$(dirname "$src")" && pwd)/$target" ;;
-    esac
-  done
-  cd "$(dirname "$src")/.." && pwd
-}
-
-# Build a GitHub raw URL for a file in this repo, parsing
-# `git remote get-url origin`. Falls back to a sensible default if not in a
-# git checkout.
-github_raw_url() {
-  local path="$1"
-  local rd
-  rd="$(repo_dir 2>/dev/null || true)"
-  local origin=""
-  if [ -n "$rd" ] && [ -d "$rd/.git" ]; then
-    origin="$(cd "$rd" && git remote get-url origin 2>/dev/null || true)"
-  fi
-  local slug=""
-  case "$origin" in
-    git@github.com:*)         slug="${origin#git@github.com:}"; slug="${slug%.git}" ;;
-    https://github.com/*)     slug="${origin#https://github.com/}"; slug="${slug%.git}" ;;
-    *)                        slug="thrcrt/desk-switch" ;;
-  esac
-  printf 'https://raw.githubusercontent.com/%s/main/%s\n' "$slug" "$path"
+  if [ -t 0 ]; then read -r -p "$prompt [Y/n] " reply || true; fi
+  case "${reply:-y}" in y|Y|yes|YES|Yes) return 0 ;; *) return 1 ;; esac
 }
 
 print_input_codes() {
@@ -105,13 +117,44 @@ print_input_codes() {
     17  HDMI 1
     18  HDMI 2
     27  USB-C
-  (Some monitors use vendor-specific values; if these don't work, check your
-   monitor's manual or experiment with values 1-30.)
 EOF
 }
 
+# --- repo introspection (used by setup commands) ------------------------------
+repo_dir() {
+  local src="${BASH_SOURCE[0]}"
+  while [ -L "$src" ]; do
+    local target; target="$(readlink "$src")"
+    case "$target" in
+      /*) src="$target" ;;
+      *)  src="$(cd "$(dirname "$src")" && pwd)/$target" ;;
+    esac
+  done
+  cd "$(dirname "$src")/.." && pwd
+}
+
+origin_slug() {
+  local rd origin slug
+  rd="$(repo_dir 2>/dev/null || true)"
+  if [ -n "$rd" ] && [ -d "$rd/.git" ]; then
+    origin="$(cd "$rd" && git remote get-url origin 2>/dev/null || true)"
+  fi
+  case "$origin" in
+    git@github.com:*)     slug="${origin#git@github.com:}"; slug="${slug%.git}" ;;
+    https://github.com/*) slug="${origin#https://github.com/}"; slug="${slug%.git}" ;;
+    *)                    slug="thrcrt/desk-switch" ;;
+  esac
+  printf '%s\n' "$slug"
+}
+
+bootstrap_url() {
+  printf 'https://raw.githubusercontent.com/%s/main/bootstrap.sh\n' "$(origin_slug)"
+}
+
+# === COMMANDS ==================================================================
+
 cmd_init() {
-  info "dw init — set this Mac up."
+  info "dw init — set up devices on this Mac."
   info ""
   info "Displays detected by m1ddc:"
   list_displays | sed 's/^/  /'
@@ -129,55 +172,67 @@ cmd_init() {
   print_input_codes
   info ""
 
-  local this_label this_input other_label other_input
-  this_label=$(prompt_default  "Label for THIS Mac" "this-mac")
-  this_input=$(prompt_default  "VCP input code for THIS Mac" "27")
-  is_int "$this_input"  || die "input code must be numeric"
+  local n_devices
+  n_devices=$(prompt_default "How many devices share this monitor?" "2")
+  is_int "$n_devices" || die "device count must be numeric"
+  [ "$n_devices" -ge 2 ] || die "at least 2 devices required"
 
-  other_label=$(prompt_default "Label for the OTHER Mac" "other-mac")
-  other_input=$(prompt_default "VCP input code for the OTHER Mac" "17")
-  is_int "$other_input" || die "input code must be numeric"
+  local devices_json='{}' i name code
+  for ((i=1; i<=n_devices; i++)); do
+    info ""
+    info "Device $i of $n_devices:"
+    name=$(prompt_default "  Name (no spaces)" "device-$i")
+    is_name "$name" || die "name '$name' contains invalid characters (allowed: letters, digits, . _ -)"
+    code=$(prompt_default "  VCP input code" "27")
+    is_int "$code"  || die "input code must be numeric"
+    devices_json=$(printf '%s' "$devices_json" \
+      | jq --arg n "$name" --argjson c "$code" '. + {($n): {input: $c}}')
+  done
 
-  [ "$this_label" = "$other_label" ] && die "labels must differ"
-  [ "$this_input" = "$other_input" ] && die "input codes must differ"
+  info ""
+  info "Configured devices:"
+  printf '%s' "$devices_json" | jq -r 'to_entries[] | "  \(.key) → input \(.value.input)"'
+  info ""
+  local first_name
+  first_name=$(printf '%s' "$devices_json" | jq -r 'keys_unsorted[0]')
+  local this_device_name
+  this_device_name=$(prompt_default "Which one is THIS Mac?" "$first_name")
+  printf '%s' "$devices_json" | jq -e --arg n "$this_device_name" '.[$n]' >/dev/null \
+    || die "'$this_device_name' is not in the device list"
 
   mkdir -p "$CONFIG_DIR"
   local tmp; tmp=$(mktemp)
   jq -n \
-    --argjson v 1 \
+    --argjson v 2 \
     --arg    dsel "$display_n" \
-    --arg    tlbl "$this_label"  --argjson tin "$this_input" \
-    --arg    olbl "$other_label" --argjson oin "$other_input" \
-    '{
-      version: $v,
-      display: { selector: $dsel },
-      sides: {
-        this:  { label: $tlbl, input: $tin },
-        other: { label: $olbl, input: $oin }
-      }
-    }' > "$tmp"
+    --arg    this "$this_device_name" \
+    --argjson devs "$devices_json" \
+    '{version: $v, display: {selector: $dsel}, this_device: $this, devices: $devs}' \
+    > "$tmp"
   mv "$tmp" "$CONFIG_FILE"
 
   info ""
-  info "Wrote $CONFIG_FILE"
+  ok "Wrote $CONFIG_FILE"
   info ""
   info "Try:"
   info "  dw status"
-  info "  dw                 # toggle to '$other_label'"
-  info "  dw $this_label      # explicit"
-  info "  dw $other_label     # explicit"
-  info ""
-  info "Run 'dw setup raycast' (or 'hammerspoon') to wire dw into a hotkey runner."
-  info "Don't forget to install dw on the OTHER Mac too."
+  info "  dw list"
+  for n in $(device_names); do
+    [ "$n" = "$this_device_name" ] && continue
+    info "  dw $n"
+  done
+  info "  dw setup raycast       # generate per-device commands and add to Raycast"
+  info "  dw share               # one-paste install commands for the other devices"
 }
 
 cmd_status() {
   read_config
-  info "Display selector: $(get_cfg '.display.selector')"
-  info "This Mac:   $(get_cfg '.sides.this.label')   (VCP input $(get_cfg '.sides.this.input'))   <-- assumed active"
-  info "Other Mac:  $(get_cfg '.sides.other.label')  (VCP input $(get_cfg '.sides.other.input'))"
+  info "Display selector: $(display_sel)"
+  info "This device:      $(this_device)"
   info ""
-  info "Run 'dw' to flip the monitor."
+  info "Devices:"
+  jq -r '.devices | to_entries[] | "  \(.key)\t→ input \(.value.input)"' "$CONFIG_FILE" \
+    | column -t -s "$(printf '\t')"
 }
 
 cmd_list() {
@@ -185,103 +240,163 @@ cmd_list() {
   list_displays
   info ""
   if config_exists; then
-    info "Configured selector: $(get_cfg '.display.selector')"
-    info "  this  = $(get_cfg '.sides.this.label')   input=$(get_cfg '.sides.this.input')"
-    info "  other = $(get_cfg '.sides.other.label')  input=$(get_cfg '.sides.other.input')"
+    info "Config: $CONFIG_FILE"
+    info "  display selector: $(display_sel)"
+    info "  this device:      $(this_device)"
+    info "  devices:"
+    local td; td="$(this_device)"
+    while IFS= read -r n; do
+      local code; code="$(input_for "$n")"
+      if [ "$n" = "$td" ]; then
+        info "    * $n  (input $code)  [this Mac]"
+      else
+        info "      $n  (input $code)"
+      fi
+    done < <(device_names)
   else
     info "(no config — run 'dw init')"
-  fi
-}
-
-do_switch() {
-  local sel="$1" code="$2" label="$3"
-  is_int "$code" || die "input code '$code' is not numeric"
-  info "Switching display '$sel' to '$label' (VCP 0x60 = $code)..."
-  if ! m1ddc display "$sel" set input "$code"; then
-    die "m1ddc could not write input. Verify selector '$sel' (try 'dw list') and that the monitor supports DDC input switching."
   fi
 }
 
 cmd_switch_to() {
   read_config
   local target="$1"
-  local sel this_label this_in other_label other_in
-  sel=$(get_cfg '.display.selector')
-  this_label=$(get_cfg '.sides.this.label')
-  this_in=$(get_cfg '.sides.this.input')
-  other_label=$(get_cfg '.sides.other.label')
-  other_in=$(get_cfg '.sides.other.input')
-
-  case "$target" in
-    "$this_label")  do_switch "$sel" "$this_in"  "$this_label" ;;
-    "$other_label") do_switch "$sel" "$other_in" "$other_label" ;;
-    *) die "unknown label '$target'. Configured: '$this_label', '$other_label'." ;;
-  esac
+  has_device "$target" || die "unknown device '$target'. Configured: $(device_names | tr '\n' ' ')"
+  do_switch "$(display_sel)" "$(input_for "$target")" "$target"
 }
 
 cmd_toggle() {
   read_config
-  # Implicit-context model: if you can read this shell, the monitor is on THIS
-  # Mac's input. m1ddc 1.2.0 cannot read VCP 0x60, so we don't try to detect.
-  local sel other_label other_in
-  sel=$(get_cfg '.display.selector')
-  other_label=$(get_cfg '.sides.other.label')
-  other_in=$(get_cfg '.sides.other.input')
-  do_switch "$sel" "$other_in" "$other_label"
+  local n; n=$(device_count)
+  if [ "$n" -eq 2 ]; then
+    # 2 devices: switch to whichever isn't this_device.
+    local td; td="$(this_device)"
+    local other; other="$(device_names | grep -v "^${td}$" | head -1)"
+    do_switch "$(display_sel)" "$(input_for "$other")" "$other"
+  else
+    info "$n devices configured. With 3 or more, 'dw' alone won't toggle."
+    info "Run an explicit switch:"
+    local td; td="$(this_device)"
+    while IFS= read -r name; do
+      [ "$name" = "$td" ] && continue
+      info "  dw $name"
+    done < <(device_names)
+    exit 2
+  fi
 }
 
-# --- setup subcommand: wire dw into hotkey runners ----------------------------
+cmd_add() {
+  read_config
+  local name="${1:-}" code="${2:-}"
+  [ -n "$name" ] || die "usage: dw add <name> <input-code>"
+  [ -n "$code" ] || die "usage: dw add <name> <input-code>"
+  is_name "$name" || die "invalid name '$name'"
+  is_int  "$code" || die "input code must be numeric"
+  has_device "$name" && die "device '$name' already exists. Use 'dw remove $name' first."
+  write_cfg_jq ".devices += {\"$name\": {input: $code}}"
+  ok "Added device '$name' (input $code)"
+  cmd_list
+}
 
-setup_raycast_manual() {
-  local rd dir
-  rd="$(repo_dir)"
-  dir="$rd/bindings/raycast"
-  printf '%s' "$dir" | pbcopy
-  ok "Path copied to clipboard:"
-  info "  $dir"
+cmd_remove() {
+  read_config
+  local name="${1:-}"
+  [ -n "$name" ] || die "usage: dw remove <name>"
+  has_device "$name" || die "no device named '$name'"
+  [ "$name" = "$(this_device)" ] && die "cannot remove the current 'this device' ($name). Use 'dw use <other>' first."
+  write_cfg_jq "del(.devices[\"$name\"])"
+  ok "Removed device '$name'"
+  cmd_list
+}
+
+cmd_use() {
+  read_config
+  local name="${1:-}"
+  [ -n "$name" ] || die "usage: dw use <name>"
+  has_device "$name" || die "no device named '$name'"
+  write_cfg_jq ".this_device = \"$name\""
+  ok "this_device → $name"
+}
+
+cmd_share() {
+  read_config
+  local td bs_url devices_arg
+  td="$(this_device)"
+  bs_url="$(bootstrap_url)"
+  devices_arg=$(jq -r '.devices | to_entries | map("\(.key)=\(.value.input)") | join(",")' "$CONFIG_FILE")
+
+  info "Paste-and-run install commands for each OTHER device."
+  info "Each command clones the repo, installs deps, and writes the device's"
+  info "config. After it finishes, the device is ready to use immediately."
   info ""
-  info "Opening Raycast. From the menu, go to:"
-  info "  Settings (⌘,) → Extensions → Script Commands → '+' → Add Script Directory"
-  info "Paste the path with ⌘V and confirm. After that, typing 'dw' in"
-  info "Raycast finds the toggle command."
-  open "raycast://"
+  while IFS= read -r name; do
+    [ "$name" = "$td" ] && continue
+    info "## On '$name':"
+    info ""
+    info "  bash <(curl -fsSL $bs_url) --this $name --devices \"$devices_arg\""
+    info ""
+  done < <(device_names)
+}
+
+# --- Raycast: generate per-device script files + add directory ----------------
+
+generate_raycast_scripts() {
+  read_config
+  local rd dir td name code title
+  rd="$(repo_dir)"
+  dir="$rd/bindings/raycast/generated"
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  td="$(this_device)"
+
+  while IFS= read -r name; do
+    [ "$name" = "$td" ] && continue
+    code="$(input_for "$name")"
+    title="dw $name"
+    cat > "$dir/dw-$name.sh" <<EOF
+#!/usr/bin/env bash
+# @raycast.schemaVersion 1
+# @raycast.title $title
+# @raycast.mode silent
+# @raycast.icon 🖥
+# @raycast.packageName Desk Switch
+# @raycast.description Switch the monitor to '$name' (VCP input $code).
+
+export PATH="/opt/homebrew/bin:\$HOME/bin:\$HOME/.local/bin:\$PATH"
+exec dw "$name"
+EOF
+    chmod +x "$dir/dw-$name.sh"
+  done < <(device_names)
+
+  printf '%s' "$dir"
 }
 
 setup_raycast() {
   if [ ! -d /Applications/Raycast.app ]; then
-    die "Raycast not found at /Applications/Raycast.app. Install it (raycast.com or 'brew install --cask raycast'), then re-run."
+    die "Raycast not found. Install (raycast.com or 'brew install --cask raycast') and re-run."
   fi
-  local raw_url
-  raw_url="$(github_raw_url 'bindings/raycast/dw-toggle.sh')"
+  read_config
+  local dir; dir="$(generate_raycast_scripts)"
 
-  # Only the deeplink path works if the script is reachable on the open web.
-  # If the repo's private (or the latest version isn't pushed yet), fall back
-  # to the local directory-add flow.
-  if ! curl -fsIL "$raw_url" >/dev/null 2>&1; then
-    info "Couldn't fetch $raw_url"
-    info "(Private repo, or the latest commit hasn't been pushed yet?)"
-    info "Falling back to local directory setup."
-    info ""
-    setup_raycast_manual
-    return
-  fi
-
-  local deeplink
-  deeplink="raycast://script-commands/install?source=$(printf %s "$raw_url" | jq -sRr @uri)"
-  info "Opening Raycast install deeplink for the 'dw' command."
+  ok "Generated $(ls "$dir" | wc -l | tr -d ' ') Raycast script command(s) in:"
+  info "  $dir"
   info ""
-  info "  Source: $raw_url"
+  printf '%s' "$dir" | pbcopy
+  ok "Path copied to clipboard."
   info ""
-  info "When Raycast appears, click 'Install'. After install, type 'dw' in"
-  info "Raycast and hit Enter to flip the monitor. To assign a global hotkey:"
-  info "Raycast → Extensions → Script Commands → dw → Record Hotkey."
-  open "$deeplink"
+  info "Add it to Raycast (one-time):"
+  info "  Settings (⌘,) → Extensions → Script Commands → '+' → Add Script Directory"
+  info "  Paste with ⌘V and confirm."
+  info ""
+  info "After that, type 'dw' in Raycast to see all devices."
+  open "raycast://"
 }
 
 setup_hammerspoon() {
   if [ ! -d /Applications/Hammerspoon.app ] && [ ! -d "$HOME/.hammerspoon" ]; then
-    die "Hammerspoon not detected. Install it (hammerspoon.org or 'brew install --cask hammerspoon'), then re-run."
+    die "Hammerspoon not detected. Install (hammerspoon.org or 'brew install --cask hammerspoon') and re-run."
   fi
+  read_config
 
   local hs_dir="$HOME/.hammerspoon"
   local init="$hs_dir/init.lua"
@@ -292,8 +407,7 @@ setup_hammerspoon() {
   dw_path="$(command -v dw || true)"
   [ -n "$dw_path" ] || die "dw not on PATH yet. Run install.sh first."
   if [ -L "$dw_path" ]; then
-    local resolved
-    resolved="$(readlink "$dw_path")"
+    local resolved; resolved="$(readlink "$dw_path")"
     case "$resolved" in
       /*) dw_path="$resolved" ;;
       *)  dw_path="$(cd "$(dirname "$dw_path")" && cd "$(dirname "$resolved")" && pwd)/$(basename "$resolved")" ;;
@@ -302,9 +416,8 @@ setup_hammerspoon() {
 
   local marker_start="-- dw:start (managed by 'dw setup hammerspoon')"
   local marker_end="-- dw:end"
-
   if grep -qF "$marker_start" "$init"; then
-    info "Existing dw block found in $init — replacing it."
+    info "Replacing existing dw block in $init"
     local tmp; tmp=$(mktemp)
     awk -v s="$marker_start" -v e="$marker_end" '
       $0 ~ s {skip=1; next}
@@ -334,9 +447,10 @@ $marker_end
 EOF
 
   ok "Wrote Hammerspoon binding to $init"
+  info "Hotkey: ⌘⌃\\\\ (Cmd+Ctrl+Backslash). Reload via menubar → Reload Config."
   info ""
-  info "Hotkey:  ⌘⌃\\\\ (cmd-ctrl-backslash)"
-  info "Reload Hammerspoon: menubar icon → Reload Config."
+  info "With multiple devices the single hotkey runs 'dw' (which prints the list"
+  info "for 3+ devices). For per-device hotkeys, edit the block in $init."
 }
 
 cmd_setup() {
@@ -346,8 +460,8 @@ cmd_setup() {
     hammerspoon) setup_hammerspoon ;;
     ""|menu)
       info "Available setup targets:"
-      [ -d /Applications/Raycast.app ]     && info "  raycast      (detected: /Applications/Raycast.app)"     || info "  raycast      (NOT detected)"
-      [ -d /Applications/Hammerspoon.app ] && info "  hammerspoon  (detected: /Applications/Hammerspoon.app)" || info "  hammerspoon  (NOT detected)"
+      [ -d /Applications/Raycast.app ]     && info "  raycast      (detected)"     || info "  raycast      (NOT detected)"
+      [ -d /Applications/Hammerspoon.app ] && info "  hammerspoon  (detected)"     || info "  hammerspoon  (NOT detected)"
       info ""
       info "Run: dw setup <target>"
       ;;
@@ -357,16 +471,20 @@ cmd_setup() {
 
 cmd_help() {
   cat <<EOF
-dw v$VERSION — flip a DDC-capable monitor between two Macs.
+dw v$VERSION — flip a DDC-capable monitor between two or more Macs.
 
 USAGE
-  dw                        Toggle: switch monitor to the OTHER Mac.
-  dw <label>                Explicit switch (e.g. 'dw mac-mini').
-  dw init                   Configure THIS Mac (display + input codes).
+  dw                        Toggle (2 devices) or list (3+ devices).
+  dw <device>               Switch monitor to <device> by name.
+  dw init                   Configure devices on THIS Mac (interactive).
+  dw add <name> <input>     Append a new device to the config.
+  dw remove <name>          Remove a device.
+  dw use <name>             Change which device THIS Mac is.
+  dw share                  Print paste-and-run install commands for other Macs.
   dw setup [target]         Wire dw into a hotkey runner.
                               Targets: raycast, hammerspoon
-  dw status                 Show current config.
   dw list                   List displays + show config.
+  dw status                 Show current config.
   dw help                   This message.
 
 CONFIG
@@ -374,12 +492,6 @@ CONFIG
 
 DEPENDENCIES
   m1ddc, jq    (brew install m1ddc jq)
-
-NOTES
-  - Run 'dw init' separately on each Mac.
-  - Toggle assumes the monitor is on THIS Mac's input (true whenever you can
-    interact with this shell). Switch back from the OTHER Mac.
-  - Switches monitor input only — keyboard/mouse switching is separate.
 EOF
 }
 
@@ -388,7 +500,11 @@ main() {
   case "$cmd" in
     ""|toggle)         cmd_toggle ;;
     init)              cmd_init ;;
-    setup)             shift || true; cmd_setup "${1:-}" ;;
+    add)               shift || true; cmd_add    "${1:-}" "${2:-}" ;;
+    remove|rm)         shift || true; cmd_remove "${1:-}" ;;
+    use)               shift || true; cmd_use    "${1:-}" ;;
+    share)             cmd_share ;;
+    setup)             shift || true; cmd_setup  "${1:-}" ;;
     status)            cmd_status ;;
     list|ls)           cmd_list ;;
     -h|--help|help)    cmd_help ;;
