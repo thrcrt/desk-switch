@@ -15,7 +15,7 @@ THIS_DEVICE=""
 DEVICES_ARG=""
 REPO_URL_DEFAULT="https://github.com/thrcrt/desk-switch.git"
 REPO_URL="$REPO_URL_DEFAULT"
-INSTALL_DIR_DEFAULT="$HOME/Desktop/desk-switch"
+INSTALL_DIR_DEFAULT="$HOME/.local/share/dw"
 INSTALL_DIR="$INSTALL_DIR_DEFAULT"
 
 while [[ $# -gt 0 ]]; do

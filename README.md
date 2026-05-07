@@ -44,15 +44,20 @@ so any `dw <name>` call switches the monitor instantly.
 ## Install on the main Mac
 
 ```sh
-git clone https://github.com/thrcrt/desk-switch.git ~/desk-switch
-cd ~/desk-switch
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/thrcrt/desk-switch/main/install.sh | bash
 dw init
 ```
 
-`install.sh` is idempotent — it verifies Apple Silicon, makes sure
-`m1ddc` and `jq` are installed via Homebrew, and symlinks `dw` into the
-first writable PATH dir it finds (preferring `/opt/homebrew/bin`).
+That's it. The installer is idempotent and:
+
+- verifies Apple Silicon macOS,
+- installs `m1ddc` and `jq` via Homebrew (skipped if already present),
+- clones the repo to `~/.local/share/dw` (override with `DW_INSTALL_DIR`),
+- symlinks `dw` onto your PATH, preferring `/opt/homebrew/bin`.
+
+After install, `dw` is callable from anywhere — no need to be in any
+specific directory. If you prefer to clone the repo manually somewhere,
+that still works: just run `./install.sh` from inside the checkout.
 
 `dw init` walks you through:
 
